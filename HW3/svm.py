@@ -1,74 +1,236 @@
 import numpy as np
-import matplotlib.pyplot as plt
-from sklearn import svm, datasets
-
-X = np.array([
-    [0, 0],
-    [0, 1],
-    [1, 0],
-    [1, 1]
-])
-y = np.array([0, 0, 0, 1])
-
-clf = svm.SVC(kernel='linear', C=1e6)
-clf.fit(X, y)
-
-plt.scatter(X[:, 0], X[:, 1], c=y, s=30, cmap=plt.cm.Paired)
-
-# plot the decision function
-ax = plt.gca()
-xlim = ax.get_xlim()
-ylim = ax.get_ylim()
-
-# create grid to evaluate model
-xx = np.linspace(xlim[0], xlim[1], 30)
-yy = np.linspace(ylim[0], ylim[1], 30)
-YY, XX = np.meshgrid(yy, xx)
-xy = np.vstack([XX.ravel(), YY.ravel()]).T
-Z = clf.decision_function(xy).reshape(XX.shape)
-
-# plot decision boundary and margins
-ax.contour(XX, YY, Z, colors='k', levels=[-1, 0, 1], alpha=0.5, linestyles=['--', '-', '--'])
-# plot support vectors
-ax.scatter(clf.support_vectors_[:, 0], clf.support_vectors_[:, 1], s=100, linewidth=1, facecolors='none')
-plt.show()
+import cvxopt
+import cvxopt.solvers
 
 
-ax = plt.gca()
-def make_meshgrid(x, y, h=.02):
-    x_min, x_max = x.min() - 1, x.max() + 1
-    y_min, y_max = y.min() - 1, y.max() + 1
-    xx, yy = np.meshgrid(np.arange(x_min, x_max, h), np.arange(y_min, y_max, h))
-    return xx, yy
+
+class LinearSVM():
+    def __init__(self, c=10.0):
+        self.c = c  
+    
+    def calc_alpha(self):
+        x_len = len(self.train_data)
+        y_len = len(self.train_label)
+
+        symmetric_matrix = np.zeros(shape=(x_len, x_len))
+        for i in range(x_len):
+            for j in range(x_len):
+                symmetric_matrix[i][j] = self.train_label[i] * self.train_label[j] * self.train_data[i].T.dot(self.train_data[j])
+
+        q = cvxopt.matrix(symmetric_matrix)
+        p = cvxopt.matrix(np.ones(x_len) * -1)
+        a = cvxopt.matrix(np.array(self.train_label).astype('float'), (1, y_len))
+        b = cvxopt.matrix(0.0)
+
+        constrain_1 = np.identity(x_len) * -1
+        constrain_2 = np.identity(x_len)
+        g = cvxopt.matrix(np.vstack((constrain_1, constrain_2)))
+        
+        constrain_1 = np.zeros(x_len) * -1
+        constrain_2 = np.ones(x_len) * self.c
+        h = cvxopt.matrix(np.hstack((constrain_1, constrain_2)))
+        
+        cvxopt.solvers.options['show_progress'] = False
+        self.alpha = cvxopt.solvers.qp(q, p, g, h, a, b)
+        self.alpha = np.ravel(self.alpha['x'])
+        self.alpha = np.expand_dims(self.alpha, axis=1)
+
+    def calc_weight(self):
+        self.weight = 0
+        for i in self.support_vector_indices.tolist():
+            self.weight += self.train_label[i] * self.alpha[i][0] * self.train_data[i].reshape((2, 1)) 
+
+    def calc_bias(self):
+        first_sv_index = self.support_vector_indices[0]
+        self.bias = (1 / self.train_label[first_sv_index]) - self.weight.T.dot(self.train_data[first_sv_index].reshape((2, 1)))
+
+    def calc_support_vector_indices(self):
+        self.support_vector_indices = np.where(self.alpha > 10 ** -4)[0]
+
+    def fit(self, train_data, train_label):
+        if len(train_data) != len(train_label):
+            raise ValueError("Length of training data and label must be same.")
+        
+        self.train_data = train_data
+        self.train_label = train_label
+
+        self.calc_alpha()
+        self.calc_support_vector_indices()
+        self.calc_weight()
+        self.calc_bias()
+
+    def judge_hyperplane_slop(self, w1, w2):
+        if w2 == 0: raise ValueError("The weight 2 can't not be zero")
+        if w1 == 0: return 'zero'
+
+        y1 = (-w1 * 0 - self.bias) / w2
+        y2 = (-w1 * 1 - self.bias) / w2
+
+        if y2 - y1 > 0:
+            return 'positive'
+        else:
+            return 'negative'
+
+    def evaluate(self, test_data, test_label):
+        w1, w2 = self.weight[0], self.weight[1]
+        hyperplane_slop = self.judge_hyperplane_slop(w1, w2)
+
+        judgement_right_count = 0
+        for i in range(len(test_data)):
+            data_x = test_data[i, 0]
+            data_y = test_data[i, 1]
+            hyperplane_height = -(w1 * data_x + self.bias) / w2
+            
+            dis = data_y - hyperplane_height
+
+            if hyperplane_slop == 'positive':
+                if dis > 0:
+                    predict = 1 
+                else:
+                    predict = -1 
+            elif hyperplane_slop == 'negative':
+                if dis > 0:
+                    predict = -1 
+                else:
+                    predict = 1 
+            else:
+                raise ValueError('This function does not support zero slop of hyperplane')
+
+            if predict == 1 and predict == test_label[i]:
+                judgement_right_count += 1
+            elif predict == -1 and predict == test_label[i]:
+                judgement_right_count += 1
+
+        accuracy = (judgement_right_count / len(test_label)) * 100
+
+        return accuracy
+
+    def get_hyperplane_points(self, x_start, x_end):
+        w1, w2 = self.weight[0], self.weight[1]
+        selected_range = range(x_start, x_end + 1, 1)
+
+        x = np.array(selected_range)
+        y = list(map(lambda x: (-(w1 * x + self.bias) / w2).flatten(), selected_range))
+        return x, y
+
+class KernelSVM():
+  def __init__(self, c=10):
+    self.c = c
+  
+  def mapping(self, train_i, train_j):
+    return 0
+
+  def calc_alpha(self):
+    x_len = len(self.train_data)
+    y_len = len(self.train_label)
+
+    symmetric_matrix = np.zeros(shape=(x_len, x_len))
+    for i in range(x_len):
+        for j in range(x_len):
+            symmetric_matrix[i][j] = self.train_label[i] * self.train_label[j] * self.mapping(self.train_data[i].reshape((2, 1)), self.train_data[j].reshape((2, 1)))
+
+    q = cvxopt.matrix(symmetric_matrix)
+    p = cvxopt.matrix(np.ones(x_len) * -1)
+    a = cvxopt.matrix(np.array(self.train_label).astype('float'), (1, y_len))
+    b = cvxopt.matrix(0.0)
+
+    constrain_1 = np.identity(x_len) * -1
+    constrain_2 = np.identity(x_len)
+    g = cvxopt.matrix(np.vstack((constrain_1, constrain_2)))
+        
+    constrain_1 = np.zeros(x_len) * -1
+    constrain_2 = np.ones(x_len) * self.c
+    h = cvxopt.matrix(np.hstack((constrain_1, constrain_2)))
+        
+    cvxopt.solvers.options['show_progress'] = False
+    self.alpha = cvxopt.solvers.qp(q, p, g, h, a, b)
+    self.alpha = np.ravel(self.alpha['x'])
+    self.alpha = np.expand_dims(self.alpha, axis=1)
+        
+  def w_times_x(self, x):
+    value = 0
+    for i in self.support_vector_indices:
+      value += self.train_label[i] * self.alpha[i][0] * self.mapping(self.train_data[i].reshape((2, 1)), x)
+    
+    return value
+
+  def calc_bias(self):
+    first_sv_index = self.support_vector_indices[0]
+    self.bias = (1 / self.train_label[first_sv_index]) - self.w_times_x(self.train_data[first_sv_index])
+
+  def calc_support_vector_indices(self):
+    self.support_vector_indices = np.where(self.alpha > 10 ** -4)[0]
+
+  def fit(self, train_data, train_label):
+    if len(train_data) != len(train_label):
+      raise ValueError("Length of training data and label must be same.")
+    
+    self.train_data = train_data
+    self.train_label = train_label
+
+    self.calc_alpha()
+    self.calc_support_vector_indices()
+    self.calc_bias()
+
+  def evaluate(self, test_data, test_label):
+    judgement_right_count = 0
+    predictions = self.predict(test_data)
+
+    for i in range(len(test_data)):
+        if predictions[i] == 1 and test_label[i] == 1:
+            judgement_right_count += 1
+        else:
+            judgement_right_count += 0
+
+        if predictions[i] == -1 and test_label[i] == -1:
+            judgement_right_count += 1
+        else:
+            judgement_right_count += 0
+
+    accuracy = (judgement_right_count / len(test_label)) * 100
+    return accuracy
 
 
-def plot_contours(ax, clf, xx, yy, **params):
-    Z = clf.predict(np.c_[xx.ravel(), yy.ravel()])
-    Z = Z.reshape(xx.shape)
-    out = ax.contourf(xx, yy, Z, **params)
-    return out
+  def predict(self, test_data):
+    predictions = []
+    for i in range(len(test_data)):
+      prediction = self.w_times_x(test_data[i]) + self.bias
+      prediction = 1 if prediction > 0 else -1
+      predictions.append(prediction)
+    
+    return predictions
+  
+  def get_binary_class_area(self, x_start=3, x_end=8, y_start=0, y_end=5):
+    positive_area = []
+    negative_area = []
 
-iris = datasets.load_iris()
-X = iris.data[:, :2]
-y = iris.target
+    for i in np.arange(x_start, x_end, 0.03):
+      for j in np.arange(y_start, y_end, 0.03):
+        prediction = self.predict(np.array([[i], [j]]).reshape((1, 2, 1)))[0]
+        
+        if prediction == 1:
+          positive_area.append([i, j])
+        else:
+          negative_area.append([i, j])
+    
+    positive_area = np.array(positive_area)
+    negative_area = np.array(negative_area)
+    
+    return positive_area, negative_area
+  
+class RBFSVM(KernelSVM):
+  def __init__(self, c=10.0, sigma=5.0):
+    super().__init__(c)
+    self.sigma = sigma
+  
+  def mapping(self, x_i, x_j):
+    x_i_minus_x_j = x_i - x_j
+    return np.exp((x_i_minus_x_j).T.dot(x_i_minus_x_j) / (-2 * self.sigma ** 2))
 
-C = 1000.0 
-clf = svm.SVC(kernel='rbf', gamma=0.01, C=C)
-clf.fit(X, y)
-
-X0, X1 = X[:, 0], X[:, 1]
-xx, yy = make_meshgrid(X0, X1)
-
-plot_contours(ax, clf, xx, yy, cmap=plt.cm.coolwarm, alpha=0.8)
-ax.scatter(X0, X1, c=y, cmap=plt.cm.coolwarm, s=20, edgecolors='k')
-ax.set_xlim(xx.min(), xx.max())
-ax.set_ylim(yy.min(), yy.max())
-ax.set_xlabel('Sepal length')
-ax.set_ylabel('Sepal width')
-ax.set_xticks(())
-ax.set_yticks(())
-
-plt.show()
-
-from sklearn.metrics import classification_report
-print(classification_report(y, clf.predict(X), target_names=iris.target_names))
+class PolynomialSVM(KernelSVM):
+  def __init__(self, c=10, p=2):
+      super().__init__(c)
+      self.p = p
+  
+  def mapping(self, x_i, x_j):
+      return x_i.T.dot(x_j) ** self.p

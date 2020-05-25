@@ -5,7 +5,7 @@ import cvxopt.solvers
 
 
 class LinearSVM():
-    def __init__(self, c=10.0):
+    def __init__(self, c=100.0):
         self.c = c  
     
     def calc_alpha(self):
@@ -228,7 +228,7 @@ class RBFSVM(KernelSVM):
     return np.exp((x_i_minus_x_j).T.dot(x_i_minus_x_j) / (-2 * self.sigma ** 2))
 
 class PolynomialSVM(KernelSVM):
-  def __init__(self, c=10, p=2):
+  def __init__(self, c=10, p=6):
       super().__init__(c)
       self.p = p
   
